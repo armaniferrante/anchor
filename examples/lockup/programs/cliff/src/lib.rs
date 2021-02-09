@@ -13,15 +13,7 @@ pub mod cliff {
     use super::*;
 
     #[state]
-    pub struct Cliff {}
-
-    impl Cliff {
-        // TODO: remove this impl block after addressing
-        //       https://github.com/project-serum/anchor/issues/71.
-        pub fn new(_ctx: Context<Empty>) -> Result<Self, ProgramError> {
-            Ok(Self {})
-        }
-    }
+    pub struct Cliff;
 
     impl VestingSchedule for Cliff {
         fn available_for_withdrawal(
@@ -29,18 +21,17 @@ pub mod cliff {
             v: Vesting,
             current_ts: i64,
         ) -> ProgramResult {
+            // Shift start date forward a year.
             let mut v = v;
-
-            // Linear unlack, shifting the start date to be one year out.
             v.start_ts += 60 * 60 * 24 * 365;
+
+            // Calculate linear unlack.
             let available = calculator::available_for_withdrawal(&v, current_ts);
 
-            // Write the return value for the caller.
+            // Write the return value for the CPI caller.
             let cpi_ctx = CpiContext::new(
                 ctx.accounts.shmem_program.clone(),
-                shmem::Ret {
-                    buffer: ctx.accounts.shmem.clone(),
-                },
+                shmem::Ret::new(ctx.accounts.shmem.clone()),
             );
             shmem::ret(cpi_ctx, available.to_le_bytes().to_vec())?;
 

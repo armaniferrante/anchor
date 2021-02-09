@@ -38,6 +38,12 @@ pub struct Ret<'info> {
     pub buffer: AccountInfo<'info>,
 }
 
+impl<'info> Ret<'info> {
+    pub fn new(buffer: AccountInfo<'info>) -> Self {
+        Self { buffer }
+    }
+}
+
 // A set of accounts that can be used with shared memory.
 #[derive(Accounts)]
 pub struct Shmem<'info> {
