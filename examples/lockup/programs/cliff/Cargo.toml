@@ -12,7 +12,7 @@ name = "cliff"
 no-entrypoint = []
 no-idl = []
 cpi = ["no-entrypoint"]
-default = []
+default = ["no-idl"]
 
 [dependencies]
 # anchor-lang = { git = "https://github.com/project-serum/anchor", features = ["derive"] }

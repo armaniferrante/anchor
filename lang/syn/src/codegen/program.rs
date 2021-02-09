@@ -268,6 +268,12 @@ pub fn generate_non_inlined_handlers(program: &Program) -> proc_macro2::TokenStr
                 Ok(())
             }
 
+            #[inline(never)]
+            #[cfg(feature = "no-idl")]
+            pub fn __idl(program_id: &Pubkey, accounts: &[AccountInfo], idl_ix_data: &[u8]) -> ProgramResult {
+                Err(anchor_lang::solana_program::program_error::ProgramError::Custom(99))
+            }
+
             // One time IDL account initializer. Will faill on subsequent
             // invocations.
             #[inline(never)]
