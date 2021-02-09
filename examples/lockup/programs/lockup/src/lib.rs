@@ -112,9 +112,9 @@ pub mod lockup {
     }
 
     #[access_control(
-				is_realized(&ctx)
-				is_withdrawable(&ctx, amount)
-		)]
+        is_realized(&ctx)
+        is_withdrawable(&ctx, amount)
+    )]
     pub fn withdraw<'a, 'b, 'c, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, Withdraw<'info>>,
         amount: u64,

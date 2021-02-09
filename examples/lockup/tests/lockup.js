@@ -159,8 +159,8 @@ describe("Lockup and Registry", () => {
       periodCount,
       depositAmount,
       nonce,
-			null, // Lock realizor is None.
-			null, // Custom vesting schedule is None.
+      null, // Lock realizor is None.
+      null, // Custom vesting schedule is None.
       {
         accounts: {
           vesting: vesting.publicKey,
@@ -303,14 +303,18 @@ describe("Lockup and Registry", () => {
   it("Sets a new lockup program", async () => {
     const dummy = new anchor.web3.Account();
     await registry.state.rpc.setLockupProgram({
-      lockupProgram: dummy.publicKey,
+      accounts: {
+        lockupProgram: dummy.publicKey,
+      },
     });
 
     let state = await registry.state();
     assert.ok(state.lockupProgram.equals(dummy.publicKey));
 
     await registry.state.rpc.setLockupProgram({
-      lockupProgram: lockup.programId,
+      accounts: {
+        lockupProgram: lockup.programId,
+      },
     });
 
     state = await registry.state();
@@ -601,8 +605,8 @@ describe("Lockup and Registry", () => {
     lockedRewardKind = {
       locked: {
         endTs: new anchor.BN(Date.now() / 1000 + 6),
-				periodCount: new anchor.BN(2),
-				schedule: null, // Custom vesting schedule: None.
+        periodCount: new anchor.BN(2),
+        schedule: null, // Custom vesting schedule: None.
       },
     };
     lockedRewardAmount = new anchor.BN(200);
