@@ -33,102 +33,112 @@ pub fn parse(filename: impl AsRef<Path>) -> Result<Idl> {
         acc_names
     };
 
-    let state = p.state.map(|state| {
-        let mut methods = state
-            .methods
-            .iter()
-            .map(|method: &StateRpc| {
-                let name = method.ident.to_string().to_mixed_case();
-                let args = method
-                    .args
-                    .iter()
-                    .map(|arg| {
-                        let mut tts = proc_macro2::TokenStream::new();
-                        arg.raw_arg.ty.to_tokens(&mut tts);
-                        let ty = tts.to_string().parse().unwrap();
-                        IdlField {
-                            name: arg.name.to_string().to_mixed_case(),
-                            ty,
-                        }
+    let state = match p.state {
+        None => None,
+        Some(state) => match state.ctor_and_anchor {
+            None => None, // State struct defined but no implementation
+            Some((ctor, anchor_ident)) => {
+                let mut methods = state
+                    .impl_block_and_methods
+                    .map(|(_impl_block, methods)| {
+                        methods
+                            .iter()
+                            .map(|method: &StateRpc| {
+                                let name = method.ident.to_string().to_mixed_case();
+                                let args = method
+                                    .args
+                                    .iter()
+                                    .map(|arg| {
+                                        let mut tts = proc_macro2::TokenStream::new();
+                                        arg.raw_arg.ty.to_tokens(&mut tts);
+                                        let ty = tts.to_string().parse().unwrap();
+                                        IdlField {
+                                            name: arg.name.to_string().to_mixed_case(),
+                                            ty,
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                let accounts_strct =
+                                    accs.get(&method.anchor_ident.to_string()).unwrap();
+                                let accounts = accounts_strct.idl_accounts(&accs);
+                                IdlStateMethod {
+                                    name,
+                                    args,
+                                    accounts,
+                                }
+                            })
+                            .collect::<Vec<_>>()
                     })
-                    .collect::<Vec<_>>();
-                let accounts_strct = accs.get(&method.anchor_ident.to_string()).unwrap();
-                let accounts = accounts_strct.idl_accounts(&accs);
-                IdlStateMethod {
-                    name,
-                    args,
-                    accounts,
-                }
-            })
-            .collect::<Vec<_>>();
-        let ctor = {
-            let name = "new".to_string();
-            let args = state
-                .ctor
-                .sig
-                .inputs
-                .iter()
-                .filter_map(|arg: &syn::FnArg| match arg {
-                    syn::FnArg::Typed(pat_ty) => {
-                        // TODO: this filtering should be donein the parser.
-                        let mut arg_str = parser::tts_to_string(&pat_ty.ty);
-                        arg_str.retain(|c| !c.is_whitespace());
-                        if arg_str.starts_with("Context<") {
-                            return None;
-                        }
-                        Some(arg)
+                    .unwrap_or(Vec::new());
+                let ctor = {
+                    let name = "new".to_string();
+                    let args = ctor
+                        .sig
+                        .inputs
+                        .iter()
+                        .filter_map(|arg: &syn::FnArg| match arg {
+                            syn::FnArg::Typed(pat_ty) => {
+                                // TODO: this filtering should be donein the parser.
+                                let mut arg_str = parser::tts_to_string(&pat_ty.ty);
+                                arg_str.retain(|c| !c.is_whitespace());
+                                if arg_str.starts_with("Context<") {
+                                    return None;
+                                }
+                                Some(arg)
+                            }
+                            _ => None,
+                        })
+                        .map(|arg: &syn::FnArg| match arg {
+                            syn::FnArg::Typed(arg_typed) => {
+                                let mut tts = proc_macro2::TokenStream::new();
+                                arg_typed.ty.to_tokens(&mut tts);
+                                let ty = tts.to_string().parse().unwrap();
+                                IdlField {
+                                    name: parser::tts_to_string(&arg_typed.pat).to_mixed_case(),
+                                    ty,
+                                }
+                            }
+                            _ => panic!("Invalid syntax"),
+                        })
+                        .collect();
+                    let accounts_strct = accs.get(&anchor_ident.to_string()).unwrap();
+                    let accounts = accounts_strct.idl_accounts(&accs);
+                    IdlStateMethod {
+                        name,
+                        args,
+                        accounts,
                     }
-                    _ => None,
-                })
-                .map(|arg: &syn::FnArg| match arg {
-                    syn::FnArg::Typed(arg_typed) => {
-                        let mut tts = proc_macro2::TokenStream::new();
-                        arg_typed.ty.to_tokens(&mut tts);
-                        let ty = tts.to_string().parse().unwrap();
-                        IdlField {
-                            name: parser::tts_to_string(&arg_typed.pat).to_mixed_case(),
-                            ty,
-                        }
+                };
+
+                methods.insert(0, ctor);
+
+                let strct = {
+                    let fields = match state.strct.fields {
+                        syn::Fields::Named(f_named) => f_named
+                            .named
+                            .iter()
+                            .map(|f: &syn::Field| {
+                                let mut tts = proc_macro2::TokenStream::new();
+                                f.ty.to_tokens(&mut tts);
+                                let ty = tts.to_string().parse().unwrap();
+                                IdlField {
+                                    name: f.ident.as_ref().unwrap().to_string().to_mixed_case(),
+                                    ty,
+                                }
+                            })
+                            .collect::<Vec<IdlField>>(),
+                        _ => panic!("State must be a struct"),
+                    };
+                    IdlTypeDef {
+                        name: state.name,
+                        ty: IdlTypeDefTy::Struct { fields },
                     }
-                    _ => panic!("Invalid syntax"),
-                })
-                .collect();
-            let accounts_strct = accs.get(&state.ctor_anchor.to_string()).unwrap();
-            let accounts = accounts_strct.idl_accounts(&accs);
-            IdlStateMethod {
-                name,
-                args,
-                accounts,
+                };
+
+                Some(IdlState { strct, methods })
             }
-        };
-
-        methods.insert(0, ctor);
-
-        let strct = {
-            let fields = match state.strct.fields {
-                syn::Fields::Named(f_named) => f_named
-                    .named
-                    .iter()
-                    .map(|f: &syn::Field| {
-                        let mut tts = proc_macro2::TokenStream::new();
-                        f.ty.to_tokens(&mut tts);
-                        let ty = tts.to_string().parse().unwrap();
-                        IdlField {
-                            name: f.ident.as_ref().unwrap().to_string().to_mixed_case(),
-                            ty,
-                        }
-                    })
-                    .collect::<Vec<IdlField>>(),
-                _ => panic!("State must be a struct"),
-            };
-            IdlTypeDef {
-                name: state.name,
-                ty: IdlTypeDefTy::Struct { fields },
-            }
-        };
-
-        IdlState { strct, methods }
-    });
+        },
+    };
     let error = parse_error_enum(&f).map(|mut e| error::parse(&mut e));
     let error_codes = error.as_ref().map(|e| {
         e.codes

@@ -17,6 +17,7 @@ incremented for features.
 * cli: Stream program logs to `.anchor/program-logs` directory when testing.
 * spl: Add shared memory api.
 * lang/attribute/access-control: Allow specifying multiple modifier functions.
+* lang/syn: Allow state structs that don't have a ctor or impl block (just trait implementations).
 
 ## [0.2.0] - 2021-02-08
 

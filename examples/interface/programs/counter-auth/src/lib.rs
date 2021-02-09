@@ -13,15 +13,7 @@ pub mod counter_auth {
     use super::*;
 
     #[state]
-    pub struct CounterAuth {}
-
-    // TODO: remove this impl block after addressing
-    //       https://github.com/project-serum/anchor/issues/71.
-    impl CounterAuth {
-        pub fn new(_ctx: Context<Empty>) -> Result<Self, ProgramError> {
-            Ok(Self {})
-        }
-    }
+    pub struct CounterAuth;
 
     impl<'info> Auth<'info, Empty> for CounterAuth {
         fn is_authorized(_ctx: Context<Empty>, current: u64, new: u64) -> ProgramResult {

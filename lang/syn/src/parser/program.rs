@@ -27,8 +27,9 @@ pub fn parse(program_mod: syn::ItemMod) -> Program {
             })
             .next();
 
-        let impl_block: Option<&syn::ItemImpl> = strct.map(|strct| {
-            let item_impls = mod_content
+        let impl_block: Option<syn::ItemImpl> = match strct {
+            None => None,
+            Some(strct) => mod_content
                 .iter()
                 .filter_map(|item| match item {
                     syn::Item::Impl(item_impl) => {
@@ -40,13 +41,12 @@ pub fn parse(program_mod: syn::ItemMod) -> Program {
                         if strct_name != impl_ty_str {
                             return None;
                         }
-                        Some(item_impl)
+                        Some(item_impl.clone())
                     }
                     _ => None,
                 })
-                .collect::<Vec<&syn::ItemImpl>>();
-            item_impls[0]
-        });
+                .next(),
+        };
 
         // All program interface implementations.
         let trait_impls: Option<Vec<StateInterface>> = strct.map(|_strct| {
@@ -84,83 +84,87 @@ pub fn parse(program_mod: syn::ItemMod) -> Program {
             let mut strct = strct.clone();
             strct.attrs = vec![];
 
-            let impl_block = impl_block.expect("Must exist if struct exists").clone();
-            let (ctor, ctor_anchor) = impl_block
-                .items
-                .iter()
-                .filter_map(|item: &syn::ImplItem| match item {
-                    syn::ImplItem::Method(m) => {
-                        if m.sig.ident.to_string() == "new" {
-                            let ctx_arg = m.sig.inputs.first().unwrap(); // todo: unwrap.
-                            match ctx_arg {
-                                syn::FnArg::Receiver(_) => panic!("invalid syntax"),
-                                syn::FnArg::Typed(arg) => {
-                                    Some((m.clone(), extract_ident(&arg).clone()))
+            let ctor_and_anchor = match &impl_block {
+                None => None,
+                Some(impl_block) => {
+                    impl_block
+                        .items
+                        .iter()
+                        .filter_map(|item: &syn::ImplItem| match item {
+                            syn::ImplItem::Method(m) => {
+                                if m.sig.ident.to_string() == "new" {
+                                    let ctx_arg = m.sig.inputs.first().unwrap(); // todo: unwrap.
+                                    match ctx_arg {
+                                        syn::FnArg::Receiver(_) => panic!("invalid syntax"),
+                                        syn::FnArg::Typed(arg) => {
+                                            Some((m.clone(), extract_ident(&arg).clone()))
+                                        }
+                                    }
+                                } else {
+                                    None
                                 }
                             }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                })
-                .next()
-                .expect("Must exist if struct exists")
-                .clone();
+                            _ => None,
+                        })
+                        .next()
+                        .clone()
+                }
+            };
 
-            let methods: Vec<StateRpc> = impl_block
-                .items
-                .iter()
-                .filter_map(|item: &syn::ImplItem| match item {
-                    syn::ImplItem::Method(m) => match m.sig.inputs.first() {
-                        None => None,
-                        Some(arg) => match arg {
-                            syn::FnArg::Typed(_) => None,
-                            syn::FnArg::Receiver(_) => {
-                                let mut args = m
-                                    .sig
-                                    .inputs
-                                    .iter()
-                                    .filter_map(|arg| match arg {
-                                        syn::FnArg::Receiver(_) => None,
-                                        syn::FnArg::Typed(arg) => Some(arg),
-                                    })
-                                    .map(|raw_arg| {
-                                        let ident = match &*raw_arg.pat {
-                                            syn::Pat::Ident(ident) => &ident.ident,
-                                            _ => panic!("invalid syntax"),
-                                        };
-                                        RpcArg {
-                                            name: ident.clone(),
-                                            raw_arg: raw_arg.clone(),
-                                        }
-                                    })
-                                    .collect::<Vec<RpcArg>>();
-                                // Remove the Anchor accounts argument
-                                let anchor = args.remove(0);
-                                let anchor_ident = extract_ident(&anchor.raw_arg).clone();
+            let impl_block_and_methods = impl_block.map(|impl_block| {
+                let methods: Vec<StateRpc> = impl_block
+                    .items
+                    .iter()
+                    .filter_map(|item: &syn::ImplItem| match item {
+                        syn::ImplItem::Method(m) => match m.sig.inputs.first() {
+                            None => None,
+                            Some(arg) => match arg {
+                                syn::FnArg::Typed(_) => None,
+                                syn::FnArg::Receiver(_) => {
+                                    let mut args = m
+                                        .sig
+                                        .inputs
+                                        .iter()
+                                        .filter_map(|arg| match arg {
+                                            syn::FnArg::Receiver(_) => None,
+                                            syn::FnArg::Typed(arg) => Some(arg),
+                                        })
+                                        .map(|raw_arg| {
+                                            let ident = match &*raw_arg.pat {
+                                                syn::Pat::Ident(ident) => &ident.ident,
+                                                _ => panic!("invalid syntax"),
+                                            };
+                                            RpcArg {
+                                                name: ident.clone(),
+                                                raw_arg: raw_arg.clone(),
+                                            }
+                                        })
+                                        .collect::<Vec<RpcArg>>();
+                                    // Remove the Anchor accounts argument
+                                    let anchor = args.remove(0);
+                                    let anchor_ident = extract_ident(&anchor.raw_arg).clone();
 
-                                Some(StateRpc {
-                                    raw_method: m.clone(),
-                                    ident: m.sig.ident.clone(),
-                                    args,
-                                    anchor_ident,
-                                    has_receiver: true,
-                                })
-                            }
+                                    Some(StateRpc {
+                                        raw_method: m.clone(),
+                                        ident: m.sig.ident.clone(),
+                                        args,
+                                        anchor_ident,
+                                        has_receiver: true,
+                                    })
+                                }
+                            },
                         },
-                    },
-                    _ => None,
-                })
-                .collect();
+                        _ => None,
+                    })
+                    .collect();
+                (impl_block.clone(), methods)
+            });
             State {
                 name: strct.ident.to_string(),
                 strct: strct.clone(),
-                interfaces: trait_impls.expect("Some if state exists"),
-                impl_block,
-                ctor,
-                ctor_anchor,
-                methods,
+                interfaces: trait_impls,
+                impl_block_and_methods,
+                ctor_and_anchor,
             }
         })
     };

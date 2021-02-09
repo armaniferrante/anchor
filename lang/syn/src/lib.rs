@@ -30,11 +30,9 @@ pub struct Program {
 pub struct State {
     pub name: String,
     pub strct: syn::ItemStruct,
-    pub impl_block: syn::ItemImpl,
-    pub methods: Vec<StateRpc>,
-    pub interfaces: Vec<StateInterface>,
-    pub ctor: syn::ImplItemMethod,
-    pub ctor_anchor: syn::Ident, // TODO: consolidate this with ctor above.
+    pub ctor_and_anchor: Option<(syn::ImplItemMethod, syn::Ident)>,
+    pub impl_block_and_methods: Option<(syn::ItemImpl, Vec<StateRpc>)>,
+    pub interfaces: Option<Vec<StateInterface>>,
 }
 
 #[derive(Debug)]
