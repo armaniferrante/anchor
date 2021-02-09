@@ -39,6 +39,3 @@ pub mod cliff {
         }
     }
 }
-
-#[derive(Accounts)]
-pub struct Empty {}
