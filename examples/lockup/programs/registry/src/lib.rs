@@ -6,7 +6,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_option::COption;
 use anchor_spl::token::{self, Mint, TokenAccount, Transfer};
-use lockup::{CreateVesting, RealizeLock, Realizor, Vesting};
+use lockup::{CreateVesting, RealizeLock, Realizor, Schedule, Vesting};
 use std::convert::Into;
 
 #[program]
@@ -19,10 +19,15 @@ mod registry {
     }
 
     impl Registry {
-        pub fn new(ctx: Context<Ctor>) -> Result<Self> {
+        pub fn new(ctx: Context<State>) -> Result<Self> {
             Ok(Registry {
                 lockup_program: *ctx.accounts.lockup_program.key,
             })
+        }
+
+        pub fn set_lockup_program(&mut self, ctx: Context<State>) -> Result<()> {
+            self.lockup_program = *ctx.accounts.lockup_program.key;
+            Ok(())
         }
     }
 
@@ -434,12 +439,13 @@ mod registry {
         ctx: Context<'a, 'b, 'c, 'info, ClaimRewardLocked<'info>>,
         nonce: u8,
     ) -> Result<()> {
-        let (end_ts, period_count) = match ctx.accounts.cmn.vendor.kind {
+        let (end_ts, period_count, schedule) = match ctx.accounts.cmn.vendor.kind {
             RewardVendorKind::Unlocked => return Err(ErrorCode::ExpectedLockedVendor.into()),
             RewardVendorKind::Locked {
                 end_ts,
                 period_count,
-            } => (end_ts, period_count),
+                ref schedule,
+            } => (end_ts, period_count, schedule.clone()),
         };
 
         // Reward distribution.
@@ -492,6 +498,7 @@ mod registry {
             reward_amount,
             nonce,
             realizor,
+            schedule.map(Into::into),
         )?;
 
         // Make sure this reward can't be processed more than once.
@@ -636,7 +643,7 @@ pub struct BalanceSandboxAccounts<'info> {
 }
 
 #[derive(Accounts)]
-pub struct Ctor<'info> {
+pub struct State<'info> {
     lockup_program: AccountInfo<'info>,
 }
 
@@ -1165,7 +1172,28 @@ pub struct RewardVendor {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
 pub enum RewardVendorKind {
     Unlocked,
-    Locked { end_ts: i64, period_count: u64 },
+    Locked {
+        end_ts: i64,
+        period_count: u64,
+        schedule: Option<LockedVendorSchedule>,
+    },
+}
+
+// Redefine `lockup::Schedule` here since the IDL can't be generate across
+// crates (yet).
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
+pub struct LockedVendorSchedule {
+    pub program: Pubkey,
+    pub metadata: Vec<u8>,
+}
+
+impl From<LockedVendorSchedule> for Schedule {
+    fn from(s: LockedVendorSchedule) -> Schedule {
+        Schedule {
+            program: s.program,
+            metadata: s.metadata,
+        }
+    }
 }
 
 #[error]

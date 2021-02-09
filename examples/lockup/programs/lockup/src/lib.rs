@@ -6,9 +6,10 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program;
 use anchor_lang::solana_program::instruction::Instruction;
+use anchor_spl::shmem::Shmem;
 use anchor_spl::token::{self, TokenAccount, Transfer};
 
-mod calculator;
+pub mod calculator;
 
 #[program]
 pub mod lockup {
@@ -75,6 +76,7 @@ pub mod lockup {
         deposit_amount: u64,
         nonce: u8,
         realizor: Option<Realizor>,
+        schedule: Option<Schedule>,
     ) -> Result<()> {
         if end_ts <= ctx.accounts.clock.unix_timestamp {
             return Err(ErrorCode::InvalidTimestamp.into());
@@ -102,24 +104,18 @@ pub mod lockup {
         vesting.grantor = *ctx.accounts.depositor_authority.key;
         vesting.nonce = nonce;
         vesting.realizor = realizor;
+        vesting.schedule = schedule;
 
         token::transfer(ctx.accounts.into(), deposit_amount)?;
 
         Ok(())
     }
 
-    #[access_control(is_realized(&ctx))]
+    #[access_control(
+				is_realized(&ctx)
+				is_withdrawable(&ctx, amount)
+		)]
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-        // Has the given amount vested?
-        if amount
-            > calculator::available_for_withdrawal(
-                &ctx.accounts.vesting,
-                ctx.accounts.clock.unix_timestamp,
-            )
-        {
-            return Err(ErrorCode::InsufficientWithdrawalBalance.into());
-        }
-
         // Transfer funds out.
         let seeds = &[
             ctx.accounts.vesting.to_account_info().key.as_ref(),
@@ -262,6 +258,8 @@ pub struct Withdraw<'info> {
     #[account(mut)]
     token: CpiAccount<'info, TokenAccount>,
     // Misc.
+    #[account(mut)]
+    shmem: AccountInfo<'info>,
     #[account("token_program.key == &token::ID")]
     token_program: AccountInfo<'info>,
     clock: Sysvar<'info, Clock>,
@@ -339,6 +337,9 @@ pub struct Vesting {
     /// cannot receive the tokens until unstaking. As a result, if one never
     /// unstakes, one would never actually receive the locked tokens.
     pub realizor: Option<Realizor>,
+    /// Parameters required for custom vesting schedules. Used in the event
+    /// the default linear unlock function is not sufficient for one's usecase.
+    pub schedule: Option<Schedule>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -355,6 +356,15 @@ pub struct Realizor {
     /// the realization condition is checked, the staking program will check the
     /// `Member` account defined by the `metadata` has no staked tokens.
     pub metadata: Pubkey,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct Schedule {
+    /// Program implementing the `VestingSchedule` interface.
+    pub program: Pubkey,
+    /// Arbitrary byte array in case the standard `Vesting` account parameters
+    /// are not sufficient for a `VestingSchedule` function.
+    pub metadata: Vec<u8>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, PartialEq, Default, Copy, Clone)]
@@ -494,7 +504,7 @@ fn whitelist_auth(lockup: &Lockup, ctx: &Context<Auth>) -> Result<()> {
 // Returns Ok if the locked vesting account has been "realized". Realization
 // is application dependent. For example, in the case of staking, one must first
 // unstake before being able to earn locked tokens.
-fn is_realized<'info>(ctx: &Context<Withdraw>) -> Result<()> {
+fn is_realized(ctx: &Context<Withdraw>) -> Result<()> {
     if let Some(realizor) = &ctx.accounts.vesting.realizor {
         let cpi_program = {
             let p = ctx.remaining_accounts[0].clone();
@@ -511,6 +521,50 @@ fn is_realized<'info>(ctx: &Context<Withdraw>) -> Result<()> {
     Ok(())
 }
 
+// Returns Ok if the vesting account can withdraw the given amount, irrespective
+// of realization.
+fn is_withdrawable(ctx: &Context<Withdraw>, amount: u64) -> Result<()> {
+    let withdrawable_amount = {
+        match &ctx.accounts.vesting.schedule {
+            // No schedule, so default to a linear unlock.
+            None => calculator::available_for_withdrawal(
+                &ctx.accounts.vesting,
+                ctx.accounts.clock.unix_timestamp,
+            ),
+            // Schedule specified, so invoke it.
+            Some(schedule) => {
+                let cpi_program = {
+                    let p = ctx.remaining_accounts[0].clone();
+                    if p.key != &schedule.program {
+                        return Err(ErrorCode::InvalidLockRealizor.into());
+                    }
+                    p
+                };
+                let cpi_accounts = ctx.remaining_accounts.to_vec()[1..].to_vec();
+                let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts.clone());
+                let vesting = (*ctx.accounts.vesting).clone();
+                vesting_schedule::available_for_withdrawal(
+                    cpi_ctx,
+                    vesting,
+                    ctx.accounts.clock.unix_timestamp,
+                )?;
+
+                // Decode the CPI return value.
+                let shmem = &cpi_accounts[0];
+                let mut result = [0u8; 8];
+                result.copy_from_slice(&shmem.try_borrow_data()?[..]);
+                u64::from_le_bytes(result)
+            }
+        }
+    };
+    // Has the given amount vested?
+    if amount > withdrawable_amount {
+        return Err(ErrorCode::InsufficientWithdrawalBalance.into());
+    }
+
+    Ok(())
+}
+
 /// RealizeLock defines the interface an external program must implement if
 /// they want to define a "realization condition" on a locked vesting account.
 /// This condition must be satisfied *even if a vesting schedule has
@@ -520,4 +574,11 @@ fn is_realized<'info>(ctx: &Context<Withdraw>) -> Result<()> {
 #[interface]
 pub trait RealizeLock<'info, T: Accounts<'info>> {
     fn is_realized(ctx: Context<T>, v: Vesting) -> ProgramResult;
+}
+
+/// Vesting schedule defines the interface an external program must implement
+/// if they want to define a custom vesting schedule function.
+#[interface]
+pub trait VestingSchedule {
+    fn available_for_withdrawal(ctx: Context<Shmem>, v: Vesting, current_ts: i64) -> ProgramResult;
 }

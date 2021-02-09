@@ -7,7 +7,7 @@ pub fn available_for_withdrawal(vesting: &Vesting, current_ts: i64) -> u64 {
 }
 
 // The amount of funds currently in the vault.
-pub fn balance(vesting: &Vesting) -> u64 {
+fn balance(vesting: &Vesting) -> u64 {
     vesting
         .outstanding
         .checked_sub(vesting.whitelist_owned)
