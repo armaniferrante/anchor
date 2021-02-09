@@ -13,5 +13,7 @@ no-entrypoint = []
 cpi = ["no-entrypoint"]
 
 [dependencies]
-anchor-lang = { git = "https://github.com/project-serum/anchor", features = ["derive"] }
-anchor-spl = { git = "https://github.com/project-serum/anchor" }
+# anchor-lang = { git = "https://github.com/project-serum/anchor", features = ["derive"] }
+# anchor-spl = { git = "https://github.com/project-serum/anchor" }
+anchor-lang = { path = "/home/armaniferrante/Documents/code/src/github.com/project-serum/anchor/lang" }
+anchor-spl = { path = "/home/armaniferrante/Documents/code/src/github.com/project-serum/anchor/spl" }

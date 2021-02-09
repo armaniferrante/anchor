@@ -115,7 +115,10 @@ pub mod lockup {
 				is_realized(&ctx)
 				is_withdrawable(&ctx, amount)
 		)]
-    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
+    pub fn withdraw<'a, 'b, 'c, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, Withdraw<'info>>,
+        amount: u64,
+    ) -> Result<()> {
         // Transfer funds out.
         let seeds = &[
             ctx.accounts.vesting.to_account_info().key.as_ref(),
@@ -187,16 +190,21 @@ pub mod lockup {
     }
 
     // Convenience function for UI's to calculate the withdrawable amount.
-    pub fn available_for_withdrawal(ctx: Context<AvailableForWithdrawal>) -> Result<()> {
-        let available = calculator::available_for_withdrawal(
+    pub fn available_for_withdrawal<'a, 'b, 'c, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, AvailableForWithdrawal<'info>>,
+    ) -> Result<()> {
+        let available = withdrawable(
             &ctx.accounts.vesting,
-            ctx.accounts.clock.unix_timestamp,
-        );
+            &ctx.accounts.clock,
+            ctx.remaining_accounts,
+        )?;
         // Log as string so that JS can read as a BN.
         msg!(&format!("{{ \"result\": \"{}\" }}", available));
         Ok(())
     }
 }
+
+// MARK: Accounts.
 
 #[derive(Accounts)]
 pub struct Auth<'info> {
@@ -258,8 +266,6 @@ pub struct Withdraw<'info> {
     #[account(mut)]
     token: CpiAccount<'info, TokenAccount>,
     // Misc.
-    #[account(mut)]
-    shmem: AccountInfo<'info>,
     #[account("token_program.key == &token::ID")]
     token_program: AccountInfo<'info>,
     clock: Sysvar<'info, Clock>,
@@ -372,6 +378,8 @@ pub struct WhitelistEntry {
     pub program_id: Pubkey,
 }
 
+// MARK: Error.
+
 #[error]
 pub enum ErrorCode {
     #[msg("Vesting end must be greater than the current unix timestamp.")]
@@ -412,6 +420,8 @@ pub enum ErrorCode {
     UnrealizedVesting,
 }
 
+// MARK: From impls.
+
 impl<'a, 'b, 'c, 'info> From<&mut CreateVesting<'info>>
     for CpiContext<'a, 'b, 'c, 'info, Transfer<'info>>
 {
@@ -437,6 +447,64 @@ impl<'a, 'b, 'c, 'info> From<&Withdraw<'info>> for CpiContext<'a, 'b, 'c, 'info,
         CpiContext::new(cpi_program, cpi_accounts)
     }
 }
+
+// MARK: Access control modifiers.
+
+pub fn is_whitelisted<'info>(transfer: &WhitelistTransfer<'info>) -> Result<()> {
+    if !transfer.lockup.whitelist.contains(&WhitelistEntry {
+        program_id: *transfer.whitelisted_program.key,
+    }) {
+        return Err(ErrorCode::WhitelistEntryNotFound.into());
+    }
+    Ok(())
+}
+
+fn whitelist_auth(lockup: &Lockup, ctx: &Context<Auth>) -> Result<()> {
+    if &lockup.authority != ctx.accounts.authority.key {
+        return Err(ErrorCode::Unauthorized.into());
+    }
+    Ok(())
+}
+
+// Returns Ok if the locked vesting account has been "realized". Realization
+// is application dependent. For example, in the case of staking, one must first
+// unstake before being able to earn locked tokens.
+fn is_realized(ctx: &Context<Withdraw>) -> Result<()> {
+    if let Some(realizor) = &ctx.accounts.vesting.realizor {
+        let cpi_program = {
+            let p = ctx.remaining_accounts[0].clone();
+            if p.key != &realizor.program {
+                return Err(ErrorCode::InvalidLockRealizor.into());
+            }
+            p
+        };
+        let cpi_accounts = ctx.remaining_accounts.to_vec()[1..].to_vec();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        let vesting = (*ctx.accounts.vesting).clone();
+        realize_lock::is_realized(cpi_ctx, vesting).map_err(|_| ErrorCode::UnrealizedVesting)?;
+    }
+    Ok(())
+}
+
+// Returns Ok if the vesting account can withdraw the given amount, irrespective
+// of realization.
+fn is_withdrawable<'a, 'b, 'c, 'info>(
+    ctx: &Context<'a, 'b, 'c, 'info, Withdraw<'info>>,
+    amount: u64,
+) -> Result<()> {
+    let withdrawable_amount = withdrawable(
+        &ctx.accounts.vesting,
+        &ctx.accounts.clock,
+        ctx.remaining_accounts,
+    )?;
+    if amount > withdrawable_amount {
+        return Err(ErrorCode::InsufficientWithdrawalBalance.into());
+    }
+
+    Ok(())
+}
+
+// MARK: Helpers.
 
 #[access_control(is_whitelisted(transfer))]
 pub fn whitelist_relay_cpi<'info>(
@@ -485,85 +553,45 @@ pub fn whitelist_relay_cpi<'info>(
         .map_err(Into::into)
 }
 
-pub fn is_whitelisted<'info>(transfer: &WhitelistTransfer<'info>) -> Result<()> {
-    if !transfer.lockup.whitelist.contains(&WhitelistEntry {
-        program_id: *transfer.whitelisted_program.key,
-    }) {
-        return Err(ErrorCode::WhitelistEntryNotFound.into());
-    }
-    Ok(())
-}
+fn withdrawable<'info>(
+    vesting: &ProgramAccount<'info, Vesting>,
+    clock: &Sysvar<'info, Clock>,
+    remaining_accounts: &[AccountInfo<'info>],
+) -> Result<u64> {
+    match &vesting.schedule {
+        // No schedule, so default to a linear unlock.
+        None => Ok(calculator::available_for_withdrawal(
+            &vesting,
+            clock.unix_timestamp,
+        )),
+        // Schedule specified, so invoke it.
+        Some(schedule) => {
+            let cpi_program = {
+                let p = remaining_accounts[0].clone();
+                if p.key != &schedule.program {
+                    return Err(ErrorCode::InvalidLockRealizor.into());
+                }
+                p
+            };
+            let cpi_accounts = remaining_accounts.to_vec()[1..].to_vec();
+            let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts.clone());
+            let vesting = (*vesting).clone();
+            vesting_schedule::available_for_withdrawal(
+                cpi_ctx,
+                (*vesting).clone(),
+                clock.unix_timestamp,
+            )?;
 
-fn whitelist_auth(lockup: &Lockup, ctx: &Context<Auth>) -> Result<()> {
-    if &lockup.authority != ctx.accounts.authority.key {
-        return Err(ErrorCode::Unauthorized.into());
-    }
-    Ok(())
-}
-
-// Returns Ok if the locked vesting account has been "realized". Realization
-// is application dependent. For example, in the case of staking, one must first
-// unstake before being able to earn locked tokens.
-fn is_realized(ctx: &Context<Withdraw>) -> Result<()> {
-    if let Some(realizor) = &ctx.accounts.vesting.realizor {
-        let cpi_program = {
-            let p = ctx.remaining_accounts[0].clone();
-            if p.key != &realizor.program {
-                return Err(ErrorCode::InvalidLockRealizor.into());
-            }
-            p
-        };
-        let cpi_accounts = ctx.remaining_accounts.to_vec()[1..].to_vec();
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-        let vesting = (*ctx.accounts.vesting).clone();
-        realize_lock::is_realized(cpi_ctx, vesting).map_err(|_| ErrorCode::UnrealizedVesting)?;
-    }
-    Ok(())
-}
-
-// Returns Ok if the vesting account can withdraw the given amount, irrespective
-// of realization.
-fn is_withdrawable(ctx: &Context<Withdraw>, amount: u64) -> Result<()> {
-    let withdrawable_amount = {
-        match &ctx.accounts.vesting.schedule {
-            // No schedule, so default to a linear unlock.
-            None => calculator::available_for_withdrawal(
-                &ctx.accounts.vesting,
-                ctx.accounts.clock.unix_timestamp,
-            ),
-            // Schedule specified, so invoke it.
-            Some(schedule) => {
-                let cpi_program = {
-                    let p = ctx.remaining_accounts[0].clone();
-                    if p.key != &schedule.program {
-                        return Err(ErrorCode::InvalidLockRealizor.into());
-                    }
-                    p
-                };
-                let cpi_accounts = ctx.remaining_accounts.to_vec()[1..].to_vec();
-                let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts.clone());
-                let vesting = (*ctx.accounts.vesting).clone();
-                vesting_schedule::available_for_withdrawal(
-                    cpi_ctx,
-                    vesting,
-                    ctx.accounts.clock.unix_timestamp,
-                )?;
-
-                // Decode the CPI return value.
-                let shmem = &cpi_accounts[0];
-                let mut result = [0u8; 8];
-                result.copy_from_slice(&shmem.try_borrow_data()?[..]);
-                u64::from_le_bytes(result)
-            }
+            // Decode the CPI return value.
+            let shmem = &cpi_accounts[0];
+            let mut result = [0u8; 8];
+            result.copy_from_slice(&shmem.try_borrow_data()?[..]);
+            Ok(u64::from_le_bytes(result))
         }
-    };
-    // Has the given amount vested?
-    if amount > withdrawable_amount {
-        return Err(ErrorCode::InsufficientWithdrawalBalance.into());
     }
-
-    Ok(())
 }
+
+// MARK: Interface traits.
 
 /// RealizeLock defines the interface an external program must implement if
 /// they want to define a "realization condition" on a locked vesting account.
