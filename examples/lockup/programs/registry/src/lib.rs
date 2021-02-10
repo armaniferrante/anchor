@@ -6,7 +6,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_option::COption;
 use anchor_spl::token::{self, Mint, TokenAccount, Transfer};
-use lockup::{CreateVesting, RealizeLock, Realizor, Schedule, Vesting};
+use lockup::{CreateVesting, RealizeLock, Vesting};
 use std::convert::Into;
 
 #[program]
@@ -434,13 +434,9 @@ mod registry {
         ctx: Context<'a, 'b, 'c, 'info, ClaimRewardLocked<'info>>,
         nonce: u8,
     ) -> Result<()> {
-        let (end_ts, period_count, schedule) = match ctx.accounts.cmn.vendor.kind {
+        let schedule = match ctx.accounts.cmn.vendor.kind {
             RewardVendorKind::Unlocked => return Err(ErrorCode::ExpectedLockedVendor.into()),
-            RewardVendorKind::Locked {
-                end_ts,
-                period_count,
-                ref schedule,
-            } => (end_ts, period_count, schedule.clone()),
+            RewardVendorKind::Locked { ref schedule } => schedule.clone(),
         };
 
         // Reward distribution.
@@ -453,22 +449,9 @@ mod registry {
             .unwrap();
         assert!(reward_amount > 0);
 
-        // The lockup program requires the timestamp to be >= clock's timestamp.
-        // So update if the time has already passed.
-        //
-        // If the reward is within `period_count` seconds of fully vesting, then
-        // we bump the `end_ts` because, otherwise, the vesting account would
-        // fail to be created. Vesting must have no more frequently than the
-        // smallest unit of time, once per second, expressed as
-        // `period_count <= end_ts - start_ts`.
-        let end_ts = match end_ts < ctx.accounts.cmn.clock.unix_timestamp + period_count as i64 {
-            true => ctx.accounts.cmn.clock.unix_timestamp + period_count as i64,
-            false => end_ts,
-        };
-
         // Specify the vesting account's realizor, so that unlocks can only
         // execute once completely unstaked.
-        let realizor = Some(Realizor {
+        let realizor = Some(lockup::Ext {
             program: *ctx.program_id,
             metadata: *ctx.accounts.cmn.member.to_account_info().key,
         });
@@ -488,12 +471,10 @@ mod registry {
         lockup::cpi::create_vesting(
             cpi_ctx,
             ctx.accounts.cmn.member.beneficiary,
-            end_ts,
-            period_count,
             reward_amount,
             nonce,
+            schedule.into(),
             realizor,
-            schedule.map(Into::into),
         )?;
 
         // Make sure this reward can't be processed more than once.
@@ -1167,24 +1148,20 @@ pub struct RewardVendor {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
 pub enum RewardVendorKind {
     Unlocked,
-    Locked {
-        end_ts: i64,
-        period_count: u64,
-        schedule: Option<LockedVendorSchedule>,
-    },
+    Locked { schedule: Ext },
 }
 
-// Redefine `lockup::Schedule` here since the IDL can't be generate across
+// Redefine `lockup::Ext` here since the IDL can't be generated across
 // crates (yet).
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
-pub struct LockedVendorSchedule {
+pub struct Ext {
     pub program: Pubkey,
-    pub metadata: Vec<u8>,
+    pub metadata: Pubkey,
 }
 
-impl From<LockedVendorSchedule> for Schedule {
-    fn from(s: LockedVendorSchedule) -> Schedule {
-        Schedule {
+impl From<Ext> for lockup::Ext {
+    fn from(s: Ext) -> lockup::Ext {
+        lockup::Ext {
             program: s.program,
             metadata: s.metadata,
         }

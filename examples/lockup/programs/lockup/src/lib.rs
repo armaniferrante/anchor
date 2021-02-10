@@ -4,12 +4,11 @@
 #![feature(proc_macro_hygiene)]
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program;
 use anchor_lang::solana_program::instruction::Instruction;
-use anchor_spl::shmem::Shmem;
+use anchor_lang::solana_program::program;
 use anchor_spl::token::{self, TokenAccount, Transfer};
 
-pub mod calculator;
+// MARK: Program.
 
 #[program]
 pub mod lockup {
@@ -19,7 +18,8 @@ pub mod lockup {
     pub struct Lockup {
         /// The key with the ability to change the whitelist.
         pub authority: Pubkey,
-        /// Valid programs the program can relay transactions to.
+        /// List of programs locked tokens can be sent to. These programs
+        /// are completely trusted to maintain the locked property.
         pub whitelist: Vec<WhitelistEntry>,
     }
 
@@ -71,22 +71,11 @@ pub mod lockup {
     pub fn create_vesting(
         ctx: Context<CreateVesting>,
         beneficiary: Pubkey,
-        end_ts: i64,
-        period_count: u64,
         deposit_amount: u64,
         nonce: u8,
-        realizor: Option<Realizor>,
-        schedule: Option<Schedule>,
+        schedule: Ext,
+        realizor: Option<Ext>,
     ) -> Result<()> {
-        if end_ts <= ctx.accounts.clock.unix_timestamp {
-            return Err(ErrorCode::InvalidTimestamp.into());
-        }
-        if period_count > (end_ts - ctx.accounts.clock.unix_timestamp) as u64 {
-            return Err(ErrorCode::InvalidPeriod.into());
-        }
-        if period_count == 0 {
-            return Err(ErrorCode::InvalidPeriod.into());
-        }
         if deposit_amount == 0 {
             return Err(ErrorCode::InvalidDepositAmount.into());
         }
@@ -95,16 +84,14 @@ pub mod lockup {
         vesting.beneficiary = beneficiary;
         vesting.mint = ctx.accounts.vault.mint;
         vesting.vault = *ctx.accounts.vault.to_account_info().key;
-        vesting.period_count = period_count;
         vesting.start_balance = deposit_amount;
-        vesting.end_ts = end_ts;
-        vesting.start_ts = ctx.accounts.clock.unix_timestamp;
+        vesting.created_ts = ctx.accounts.clock.unix_timestamp;
         vesting.outstanding = deposit_amount;
         vesting.whitelist_owned = 0;
         vesting.grantor = *ctx.accounts.depositor_authority.key;
         vesting.nonce = nonce;
-        vesting.realizor = realizor;
         vesting.schedule = schedule;
+        vesting.realizor = realizor;
 
         token::transfer(ctx.accounts.into(), deposit_amount)?;
 
@@ -269,6 +256,11 @@ pub struct Withdraw<'info> {
     #[account("token_program.key == &token::ID")]
     token_program: AccountInfo<'info>,
     clock: Sysvar<'info, Clock>,
+    // Vesting schedule.
+    #[account("&vesting.schedule.program == schedule_program.key")]
+    schedule_program: AccountInfo<'info>,
+    #[account("&vesting.schedule.metadata == schedule_metadata.key")]
+    schedule_metadata: AccountInfo<'info>,
 }
 
 #[derive(Accounts)]
@@ -306,6 +298,11 @@ pub struct WhitelistTransfer<'info> {
 pub struct AvailableForWithdrawal<'info> {
     vesting: ProgramAccount<'info, Vesting>,
     clock: Sysvar<'info, Clock>,
+    // Vesting schedule.
+    #[account("&vesting.schedule.program == schedule_program.key")]
+    schedule_program: AccountInfo<'info>,
+    #[account("&vesting.schedule.metadata == schedule_metadata.key")]
+    schedule_metadata: AccountInfo<'info>,
 }
 
 #[account]
@@ -314,10 +311,10 @@ pub struct Vesting {
     pub beneficiary: Pubkey,
     /// The mint of the SPL token locked up.
     pub mint: Pubkey,
-    /// Address of the account's token vault.
-    pub vault: Pubkey,
     /// The owner of the token account funding this account.
     pub grantor: Pubkey,
+    /// Address of the account's token vault.
+    pub vault: Pubkey,
     /// The outstanding SRM deposit backing this vesting account. All
     /// withdrawals will deduct this balance.
     pub outstanding: u64,
@@ -325,52 +322,40 @@ pub struct Vesting {
     /// originally deposited.
     pub start_balance: u64,
     /// The unix timestamp at which this vesting account was created.
-    pub start_ts: i64,
-    /// The ts at which all the tokens associated with this account
-    /// should be vested.
-    pub end_ts: i64,
-    /// The number of times vesting will occur. For example, if vesting
-    /// is once a year over seven years, this will be 7.
-    pub period_count: u64,
+    pub created_ts: i64,
     /// The amount of tokens in custody of whitelisted programs.
     pub whitelist_owned: u64,
     /// Signer nonce.
     pub nonce: u8,
-    /// The program that determines when the locked account is **realized**.
+    /// External program defining a vesting schedule.
+    pub schedule: Ext,
+    /// External program defining a "realization" condition.
+    ///
     /// In addition to the lockup schedule, the program provides the ability
     /// for applications to determine when locked tokens are considered earned.
     /// For example, when earning locked tokens via the staking program, one
     /// cannot receive the tokens until unstaking. As a result, if one never
     /// unstakes, one would never actually receive the locked tokens.
-    pub realizor: Option<Realizor>,
-    /// Parameters required for custom vesting schedules. Used in the event
-    /// the default linear unlock function is not sufficient for one's usecase.
-    pub schedule: Option<Schedule>,
+    pub realizor: Option<Ext>,
 }
 
+/// An external program and account state. For example, this could be the
+/// staking `Registry` program and a `Member` account.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct Realizor {
-    /// Program to invoke to check a realization condition. This program must
-    /// implement the `RealizeLock` trait.
+pub struct Ext {
+    /// External program id to invoke.
     pub program: Pubkey,
-    /// Address of an arbitrary piece of metadata interpretable by the realizor
-    /// program. For example, when a vesting account is allocated, the program
-    /// can define its realization condition as a function of some account
-    /// state. The metadata is the address of that account.
+    /// Address of an arbitrary piece of metadata interpretable by the external
+    /// program.
+    ///
+    /// For example, when a vesting account is allocated, the program can define
+    /// its realization condition as a function of some account state. The
+    /// metadata is the address of that account.
     ///
     /// In the case of staking, the metadata is a `Member` account address. When
     /// the realization condition is checked, the staking program will check the
     /// `Member` account defined by the `metadata` has no staked tokens.
     pub metadata: Pubkey,
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct Schedule {
-    /// Program implementing the `VestingSchedule` interface.
-    pub program: Pubkey,
-    /// Arbitrary byte array in case the standard `Vesting` account parameters
-    /// are not sufficient for a `VestingSchedule` function.
-    pub metadata: Vec<u8>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, PartialEq, Default, Copy, Clone)]
@@ -382,10 +367,6 @@ pub struct WhitelistEntry {
 
 #[error]
 pub enum ErrorCode {
-    #[msg("Vesting end must be greater than the current unix timestamp.")]
-    InvalidTimestamp,
-    #[msg("The number of vesting periods must be greater than zero.")]
-    InvalidPeriod,
     #[msg("The vesting deposit amount must be greater than zero.")]
     InvalidDepositAmount,
     #[msg("The Whitelist entry is not a valid program address.")]
@@ -418,6 +399,8 @@ pub enum ErrorCode {
     InvalidLockRealizor,
     #[msg("You have not realized this vesting account.")]
     UnrealizedVesting,
+    #[msg("The given vesting schedule program is invalid.")]
+    InvalidScheduleProgram,
 }
 
 // MARK: From impls.
@@ -549,8 +532,7 @@ pub fn whitelist_relay_cpi<'info>(
     let signer = &[&seeds[..]];
     let mut accounts = transfer.to_account_infos();
     accounts.extend_from_slice(&remaining_accounts);
-    solana_program::program::invoke_signed(&relay_instruction, &accounts, signer)
-        .map_err(Into::into)
+    program::invoke_signed(&relay_instruction, &accounts, signer).map_err(Into::into)
 }
 
 fn withdrawable<'info>(
@@ -558,40 +540,60 @@ fn withdrawable<'info>(
     clock: &Sysvar<'info, Clock>,
     remaining_accounts: &[AccountInfo<'info>],
 ) -> Result<u64> {
-    match &vesting.schedule {
-        // No schedule, so default to a linear unlock.
-        None => Ok(calculator::available_for_withdrawal(
-            &vesting,
-            clock.unix_timestamp,
-        )),
-        // Schedule specified, so invoke it.
-        Some(schedule) => {
-            let cpi_program = {
-                let p = remaining_accounts[0].clone();
-                if p.key != &schedule.program {
-                    return Err(ErrorCode::InvalidLockRealizor.into());
-                }
-                p
-            };
-            let cpi_accounts = remaining_accounts.to_vec()[1..].to_vec();
-            let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts.clone());
-            let vesting = (*vesting).clone();
-            vesting_schedule::available_for_withdrawal(
-                cpi_ctx,
-                (*vesting).clone(),
-                clock.unix_timestamp,
-            )?;
-
-            // Decode the CPI return value.
-            let shmem = &cpi_accounts[0];
-            let mut result = [0u8; 8];
-            result.copy_from_slice(&shmem.try_borrow_data()?[..]);
-            Ok(u64::from_le_bytes(result))
-        }
-    }
+    Ok(std::cmp::min(
+        outstanding_vested(vesting, clock, remaining_accounts)?,
+        balance(&*vesting),
+    ))
 }
 
-// MARK: Interface traits.
+// The amount of funds currently in the vault.
+fn balance(vesting: &Vesting) -> u64 {
+    vesting
+        .outstanding
+        .checked_sub(vesting.whitelist_owned)
+        .unwrap()
+}
+
+// The amount of outstanding locked tokens vested. Note that these
+// tokens might have been transferred to whitelisted programs, so this amount
+// can be less than what is actually in the vault.
+fn outstanding_vested<'info>(
+    vesting: &ProgramAccount<'info, Vesting>,
+    clock: &Sysvar<'info, Clock>,
+    remaining_accounts: &[AccountInfo<'info>],
+) -> Result<u64> {
+    let total_vested = {
+        // Invoke external program to calculate the withdrawable amount.
+        let cpi_program = {
+            let p = remaining_accounts[0].clone();
+            if p.key != &vesting.schedule.program {
+                return Err(ErrorCode::InvalidScheduleProgram.into());
+            }
+            p
+        };
+        let cpi_accounts = remaining_accounts.to_vec()[1..].to_vec();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts.clone());
+        vesting_schedule::total_vested(cpi_ctx, (**vesting).clone(), clock.unix_timestamp)?;
+
+        // Decode the CPI return value.
+        let shmem = &cpi_accounts[0];
+        let mut result = [0u8; 8];
+        result.copy_from_slice(&shmem.try_borrow_data()?[..]);
+        u64::from_le_bytes(result)
+    };
+
+    Ok(total_vested.checked_sub(withdrawn_amount(vesting)).unwrap())
+}
+
+// Returns the amount withdrawn from this vesting account.
+fn withdrawn_amount(vesting: &Vesting) -> u64 {
+    vesting
+        .start_balance
+        .checked_sub(vesting.outstanding)
+        .unwrap()
+}
+
+// MARK: External program interfaces.
 
 /// RealizeLock defines the interface an external program must implement if
 /// they want to define a "realization condition" on a locked vesting account.
@@ -607,6 +609,7 @@ pub trait RealizeLock<'info, T: Accounts<'info>> {
 /// Vesting schedule defines the interface an external program must implement
 /// if they want to define a custom vesting schedule function.
 #[interface]
-pub trait VestingSchedule {
-    fn available_for_withdrawal(ctx: Context<Shmem>, v: Vesting, current_ts: i64) -> ProgramResult;
+pub trait VestingSchedule<'info, T: Accounts<'info>> {
+    /// Returns the amount vested up tlil the given `current_ts`.
+    fn total_vested(ctx: Context<T>, v: Vesting, current_ts: i64) -> ProgramResult;
 }
