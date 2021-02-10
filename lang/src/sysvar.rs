@@ -23,6 +23,15 @@ impl<'info, T: solana_program::sysvar::Sysvar> Sysvar<'info, T> {
     }
 }
 
+impl<'info, T: solana_program::sysvar::Sysvar> Clone for Sysvar<'info, T> {
+    fn clone(&self) -> Self {
+        Self {
+            info: self.info.clone(),
+            account: T::from_account_info(&self.info).unwrap(),
+        }
+    }
+}
+
 impl<'info, T: solana_program::sysvar::Sysvar> Accounts<'info> for Sysvar<'info, T> {
     fn try_accounts(
         _program_id: &Pubkey,

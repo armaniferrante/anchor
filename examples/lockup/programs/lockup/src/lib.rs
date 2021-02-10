@@ -6,6 +6,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program;
+use anchor_spl::shmem;
 use anchor_spl::token::{self, TokenAccount, Transfer};
 
 // MARK: Program.
@@ -183,7 +184,7 @@ pub mod lockup {
         let available = withdrawable(
             &ctx.accounts.vesting,
             &ctx.accounts.clock,
-            ctx.remaining_accounts,
+            &ctx.accounts.schedule,
         )?;
         // Log as string so that JS can read as a BN.
         msg!(&format!("{{ \"result\": \"{}\" }}", available));
@@ -256,11 +257,21 @@ pub struct Withdraw<'info> {
     #[account("token_program.key == &token::ID")]
     token_program: AccountInfo<'info>,
     clock: Sysvar<'info, Clock>,
-    // Vesting schedule.
-    #[account("&vesting.schedule.program == schedule_program.key")]
-    schedule_program: AccountInfo<'info>,
-    #[account("&vesting.schedule.metadata == schedule_metadata.key")]
-    schedule_metadata: AccountInfo<'info>,
+    #[account(
+        "&vesting.schedule.program == schedule.program.key",
+        "&vesting.schedule.metadata == schedule.metadata.key"
+    )]
+    schedule: Schedule<'info>,
+}
+
+#[derive(Accounts)]
+pub struct Schedule<'info> {
+    program: AccountInfo<'info>,
+    metadata: AccountInfo<'info>,
+    #[account(mut, "shmem.owner == shmem_program.key")]
+    shmem: AccountInfo<'info>,
+    #[account("shmem_program.key == &shmem::ID")]
+    shmem_program: AccountInfo<'info>,
 }
 
 #[derive(Accounts)]
@@ -298,11 +309,7 @@ pub struct WhitelistTransfer<'info> {
 pub struct AvailableForWithdrawal<'info> {
     vesting: ProgramAccount<'info, Vesting>,
     clock: Sysvar<'info, Clock>,
-    // Vesting schedule.
-    #[account("&vesting.schedule.program == schedule_program.key")]
-    schedule_program: AccountInfo<'info>,
-    #[account("&vesting.schedule.metadata == schedule_metadata.key")]
-    schedule_metadata: AccountInfo<'info>,
+    schedule: Schedule<'info>,
 }
 
 #[account]
@@ -478,12 +485,11 @@ fn is_withdrawable<'a, 'b, 'c, 'info>(
     let withdrawable_amount = withdrawable(
         &ctx.accounts.vesting,
         &ctx.accounts.clock,
-        ctx.remaining_accounts,
+        &ctx.accounts.schedule,
     )?;
     if amount > withdrawable_amount {
         return Err(ErrorCode::InsufficientWithdrawalBalance.into());
     }
-
     Ok(())
 }
 
@@ -535,15 +541,14 @@ pub fn whitelist_relay_cpi<'info>(
     program::invoke_signed(&relay_instruction, &accounts, signer).map_err(Into::into)
 }
 
-fn withdrawable<'info>(
+fn withdrawable<'a, 'info>(
     vesting: &ProgramAccount<'info, Vesting>,
     clock: &Sysvar<'info, Clock>,
-    remaining_accounts: &[AccountInfo<'info>],
+    schedule: &Schedule<'info>,
 ) -> Result<u64> {
-    Ok(std::cmp::min(
-        outstanding_vested(vesting, clock, remaining_accounts)?,
-        balance(&*vesting),
-    ))
+    let current_balance = balance(&*vesting);
+    let vested_outstanding = outstanding_vested(vesting, clock, schedule)?;
+    Ok(std::cmp::min(current_balance, vested_outstanding))
 }
 
 // The amount of funds currently in the vault.
@@ -557,32 +562,27 @@ fn balance(vesting: &Vesting) -> u64 {
 // The amount of outstanding locked tokens vested. Note that these
 // tokens might have been transferred to whitelisted programs, so this amount
 // can be less than what is actually in the vault.
-fn outstanding_vested<'info>(
+fn outstanding_vested<'a, 'info>(
     vesting: &ProgramAccount<'info, Vesting>,
     clock: &Sysvar<'info, Clock>,
-    remaining_accounts: &[AccountInfo<'info>],
+    schedule: &Schedule<'info>,
 ) -> Result<u64> {
     let total_vested = {
         // Invoke external program to calculate the withdrawable amount.
-        let cpi_program = {
-            let p = remaining_accounts[0].clone();
-            if p.key != &vesting.schedule.program {
-                return Err(ErrorCode::InvalidScheduleProgram.into());
-            }
-            p
-        };
-        let cpi_accounts = remaining_accounts.to_vec()[1..].to_vec();
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts.clone());
+        let cpi_accounts = schedule.to_account_infos()[1..].to_vec();
+        let cpi_ctx = CpiContext::new(schedule.program.clone(), cpi_accounts);
         vesting_schedule::total_vested(cpi_ctx, (**vesting).clone(), clock.unix_timestamp)?;
 
         // Decode the CPI return value.
-        let shmem = &cpi_accounts[0];
+        let shmem = &schedule.shmem;
         let mut result = [0u8; 8];
         result.copy_from_slice(&shmem.try_borrow_data()?[..]);
         u64::from_le_bytes(result)
     };
 
-    Ok(total_vested.checked_sub(withdrawn_amount(vesting)).unwrap())
+    Ok(total_vested
+        .checked_sub(withdrawn_amount(&vesting))
+        .unwrap())
 }
 
 // Returns the amount withdrawn from this vesting account.

@@ -8,6 +8,10 @@ export const TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 );
 
+export const SHMEM_PROGRAM_ID = new PublicKey(
+	"DynWy94wrWp5RimU49creYMQ5py3Up8BBNS4VA73VCpi"
+);
+
 async function getMultipleAccounts(
   connection: Connection,
   publicKeys: PublicKey[]

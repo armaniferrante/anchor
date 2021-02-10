@@ -19,7 +19,7 @@ pub mod linear {
 
     impl<'info> VestingSchedule<'info, TotalVested<'info>> for Linear {
         fn total_vested(ctx: Context<TotalVested>, v: Vesting, current_ts: i64) -> ProgramResult {
-            // Calculate linear unlack.
+            // Calculate linear unlock.
             let vested_amount = {
                 if current_ts < ctx.accounts.schedule.start_ts {
                     0

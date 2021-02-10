@@ -1,5 +1,6 @@
 const assert = require("assert");
-const anchor = require("@project-serum/anchor");
+//const anchor = require("@project-serum/anchor");
+const anchor = require('/home/armaniferrante/Documents/code/src/github.com/project-serum/anchor/ts');
 const serumCmn = require("@project-serum/common");
 const TokenInstructions = require("@project-serum/serum").TokenInstructions;
 const utils = require("./utils");
@@ -11,7 +12,8 @@ describe("Lockup and Registry", () => {
   // Configure the client to use the provider.
   anchor.setProvider(provider);
 
-  const lockup = anchor.workspace.Lockup;
+	const lockup = anchor.workspace.Lockup;
+	const linear = anchor.workspace.Linear;
   const registry = anchor.workspace.Registry;
 
   let lockupAddress = null;
@@ -116,7 +118,7 @@ describe("Lockup and Registry", () => {
         await lockup.state.rpc.whitelistAdd(e, { accounts });
       },
       (err) => {
-        assert.equal(err.code, 108);
+        assert.equal(err.code, 106);
         assert.equal(err.msg, "Whitelist is full");
         return true;
       }
@@ -133,14 +135,37 @@ describe("Lockup and Registry", () => {
     assert.deepEqual(lockupAccount.whitelist, entries.slice(1));
   });
 
+
+	const schedule = new anchor.web3.Account();
+	const startTs = new anchor.BN(Date.now() / 1000);
+	const endTs = new anchor.BN(startTs.toNumber() + 5);
+	const periodCount = new anchor.BN(2);
+
+  it('Creates a vesting schedule', async () => {
+			await linear.rpc.createSchedule(startTs, endTs, periodCount, {
+					accounts: {
+							schedule: schedule.publicKey,
+							rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+					},
+					instructions: [
+							await linear.account.schedule.createInstruction(schedule),
+					],
+					signers: [schedule],
+			});
+
+			const scheduleAccount = await linear.account.schedule(schedule.publicKey);
+
+			assert.ok(scheduleAccount.startTs.eq(startTs));
+			assert.ok(scheduleAccount.endTs.eq(endTs));
+			assert.ok(scheduleAccount.periodCount.eq(periodCount));
+	});
+
   const vesting = new anchor.web3.Account();
   let vestingAccount = null;
   let vestingSigner = null;
 
   it("Creates a vesting account", async () => {
     const beneficiary = provider.wallet.publicKey;
-    const endTs = new anchor.BN(Date.now() / 1000 + 5);
-    const periodCount = new anchor.BN(2);
     const depositAmount = new anchor.BN(100);
 
     const vault = new anchor.web3.Account();
@@ -155,12 +180,10 @@ describe("Lockup and Registry", () => {
 
     await lockup.rpc.createVesting(
       beneficiary,
-      endTs,
-      periodCount,
       depositAmount,
-      nonce,
+			nonce,
+			{ program: linear.programId, metadata: schedule.publicKey },
       null, // Lock realizor is None.
-      null, // Custom vesting schedule is None.
       {
         accounts: {
           vesting: vesting.publicKey,
@@ -191,11 +214,9 @@ describe("Lockup and Registry", () => {
     assert.ok(vestingAccount.grantor.equals(provider.wallet.publicKey));
     assert.ok(vestingAccount.outstanding.eq(depositAmount));
     assert.ok(vestingAccount.startBalance.eq(depositAmount));
-    assert.ok(vestingAccount.endTs.eq(endTs));
-    assert.ok(vestingAccount.periodCount.eq(periodCount));
     assert.ok(vestingAccount.whitelistOwned.eq(new anchor.BN(0)));
     assert.equal(vestingAccount.nonce, nonce);
-    assert.ok(endTs.gt(vestingAccount.startTs));
+		assert.ok(vestingAccount.createdTs.gt(new anchor.BN(0)));
     assert.ok(vestingAccount.realizor === null);
   });
 
@@ -210,12 +231,15 @@ describe("Lockup and Registry", () => {
             vault: vestingAccount.vault,
             vestingSigner: vestingSigner,
             tokenProgram: TokenInstructions.TOKEN_PROGRAM_ID,
-            clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+						clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+						scheduleProgram: linear.programId,
+						scheduleMetadata: schedule.publicKey,
           },
         });
       },
-      (err) => {
-        assert.equal(err.code, 107);
+				(err) => {
+						console.log('err', err);
+        assert.equal(err.code, 105);
         assert.equal(err.msg, "Insufficient withdrawal balance.");
         return true;
       }
@@ -241,7 +265,9 @@ describe("Lockup and Registry", () => {
         vault: vestingAccount.vault,
         vestingSigner,
         tokenProgram: TokenInstructions.TOKEN_PROGRAM_ID,
-        clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+				clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+				scheduleProgram: linear.programId,
+				scheduleMetadata: schedule.publicKey,
       },
     });
 

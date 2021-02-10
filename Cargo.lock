@@ -57,6 +57,7 @@ dependencies = [
  "anyhow",
  "proc-macro2 1.0.24",
  "quote 1.0.8",
+ "regex",
  "syn 1.0.57",
 ]
 
@@ -181,6 +182,7 @@ name = "anchor-spl"
 version = "0.2.0"
 dependencies = [
  "anchor-lang",
+ "solana-program",
  "spl-token 3.0.1",
 ]
 
