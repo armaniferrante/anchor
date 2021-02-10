@@ -300,27 +300,6 @@ describe("Lockup and Registry", () => {
     );
   });
 
-  it("Sets a new lockup program", async () => {
-    const dummy = new anchor.web3.Account();
-    await registry.state.rpc.setLockupProgram({
-      accounts: {
-        lockupProgram: dummy.publicKey,
-      },
-    });
-
-    let state = await registry.state();
-    assert.ok(state.lockupProgram.equals(dummy.publicKey));
-
-    await registry.state.rpc.setLockupProgram({
-      accounts: {
-        lockupProgram: lockup.programId,
-      },
-    });
-
-    state = await registry.state();
-    assert.ok(state.lockupProgram.equals(lockup.programId));
-  });
-
   it("Initializes the registrar", async () => {
     await registry.rpc.initialize(
       mint,

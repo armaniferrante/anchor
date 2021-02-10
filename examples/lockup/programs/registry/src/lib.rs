@@ -24,11 +24,6 @@ mod registry {
                 lockup_program: *ctx.accounts.lockup_program.key,
             })
         }
-
-        pub fn set_lockup_program(&mut self, ctx: Context<State>) -> Result<()> {
-            self.lockup_program = *ctx.accounts.lockup_program.key;
-            Ok(())
-        }
     }
 
     impl<'info> RealizeLock<'info, IsRealized<'info>> for Registry {
